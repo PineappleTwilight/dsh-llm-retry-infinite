@@ -1,100 +1,214 @@
 # `dsh-llm-retry-infinite`
 
-DSH plugin that applies **infinite exponential retries** to every LLM request failure, with each individual wait period capped at **10 minutes**.
+A [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin that replaces the built-in LLM retry behavior with **infinite exponential retries**. Every failed LLM request is retried indefinitely with an exponential backoff that caps each individual wait at **10 minutes**.
+
+## Why this exists
+
+The built-in `@deepseek-ai/dsh-llm-retry` defaults to `mode: 'normal'` with a hard cap of **2 retries**. For environments with transient rate limits, flaky connectivity, or provider instability, you may want the harness to keep trying until the request succeeds — without a retry ceiling. This plugin takes over the entire retry chain and never gives up.
 
 ## How it works
 
-1. Listens on the `agent/request-error` event from the DSH agent loop.
-2. On failure, computes an exponential backoff delay: `min(initialDelayMs × 2^retry, maxDelayMs)`.
-3. Waits the computed delay (with symmetric jitter, cancellable on abort).
+1. Intercepts every `agent/request-error` event from the DSH agent loop.
+2. Computes an exponential backoff: `min(initialDelayMs × 2^retry, 600 000)`.
+3. Waits the computed delay (symmetric jitter, cancellable on abort or session close).
 4. Returns `{ kind: 'retry' }` to re-attempt the request.
-5. Repeats **indefinitely** until the request succeeds, the session is cancelled, or the plugin is disposed.
+5. Repeats **forever** until success, cancellation, or plugin disposal.
 
-There is **no retry limit** — retries continue forever, making this suitable for environments with transient rate limits or unreliable connectivity where you want the harness to keep trying.
+The plugin **does not delegate** to the built-in retry handler — it fully replaces it.
 
-## Backoff schedule
+## Backoff schedule (default config)
 
-| Retry | Delay (default config) |
-|-------|----------------------|
-| 1     | ~1 s  (1000 × 2⁰)   |
-| 2     | ~2 s  (1000 × 2¹)   |
-| 3     | ~4 s  (1000 × 2²)   |
-| 4     | ~8 s  (1000 × 2³)   |
-| 5     | ~16 s (1000 × 2⁴)   |
-| 6     | ~32 s (1000 × 2⁵)   |
-| 7     | ~64 s (1000 × 2⁶)   |
-| 8     | ~128 s (1000 × 2⁷)  |
-| 9     | ~256 s (1000 × 2⁸)  |
-| 10    | ~512 s (1000 × 2⁹)  |
-| 11+   | **600 s (10 min cap)** |
+| Retry # | Delay      | Approx. |
+|---------|------------|---------|
+| 1       | 1000 ms    | 1 s     |
+| 2       | 2000 ms    | 2 s     |
+| 3       | 4000 ms    | 4 s     |
+| 4       | 8000 ms    | 8 s     |
+| 5       | 16 000 ms  | 16 s    |
+| 6       | 32 000 ms  | 32 s    |
+| 7       | 64 000 ms  | ~1 m    |
+| 8       | 128 000 ms | ~2 m    |
+| 9       | 256 000 ms | ~4 m    |
+| 10      | 512 000 ms | ~8.5 m  |
+| 11+     | 600 000 ms | **10 m** (cap) |
 
-Each delay includes ±10 % symmetric jitter by default.
+Each value includes ±10 % symmetric jitter by default.
+
+---
 
 ## Installation
+
+### 1. Install the package
 
 ```bash
 cd ~/.dsh/profiles/<your-profile>
 pnpm add dsh-llm-retry-infinite
 ```
 
-Then add to your profile's bundle list in `package.json`:
+For a local / development copy:
 
-```json
+```bash
+cd ~/.dsh/profiles/<your-profile>
+pnpm add "link:/absolute/path/to/dsh-llm-retry-infinite"
+```
+
+### 2. Register as a bundle
+
+Open `package.json` in your profile directory and add `"dsh-llm-retry-infinite"` to the `dsh.profile.bundles` array:
+
+```jsonc
 {
   "dsh": {
     "profile": {
       "bundles": [
-        "...",
-        "dsh-llm-retry-infinite"
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-web-app",
+        // ... other bundles ...
+        "dsh-llm-retry-infinite"   // ← add this
       ]
     }
   }
 }
 ```
 
-## Configuration
+### 3. Disable the built-in retry plugin
 
-All config fields are optional. Defaults are shown in parentheses.
+The built-in `@deepseek-ai/dsh-llm-retry` (id: `llm-retry`) is loaded by `dsh-base` and runs **before** any later bundle in the waterfall chain. It must be disabled or it will intercept retries with its 2-attempt cap.
+
+Open `~/.dsh/profiles/<your-profile>/cordis.patch.yml` and add a disable entry:
 
 ```yaml
-# In cordis.patch.yml
-- name: dsh-llm-retry-infinite
-  config:
-    initialDelayMs: 1000   # Base delay for first retry (default: 1000)
-    maxDelayMs: 600000     # Cap per wait period — 10 min (default: 600000)
-    jitterRatio: 0.1       # Symmetric jitter ±10% (default: 0.1)
+[
+  {
+    id: "llm-retry",
+    disabled: true
+  }
+]
 ```
 
-### Constraints
+This tells the Cordis loader to skip the built-in retry plugin entirely, leaving `dsh-llm-retry-infinite` as the sole retry handler.
 
-- `initialDelayMs` must be positive and ≤ 600 000.
-- `maxDelayMs` must be positive and ≤ 600 000.
-- `jitterRatio` must be in [0, 1].
+### 4. (Optional) Restart DSH
+
+If DSH is already running, restart it to pick up the new plugin and patch:
+
+```bash
+# For the web profile:
+# Stop the existing process, then:
+dsh web
+```
+
+---
+
+## Configuration
+
+All fields are optional. You can pass config through `cordis.patch.yml` or through the bundle's own `config` block:
+
+```yaml
+# In cordis.patch.yml — override config for the plugin entry
+[
+  {
+    id: "llm-retry",
+    disabled: true
+  },
+  {
+    insert: [
+      {
+        id: "llm-retry-infinite",
+        name: "dsh-llm-retry-infinite",
+        config: {
+          initialDelayMs: 2000    # base delay for first retry (default: 1000)
+          maxDelayMs: 300000      # cap per wait — 5 min (default: 600000)
+          jitterRatio: 0.15       # symmetric jitter ±15% (default: 0.1)
+        }
+      }
+    ]
+  }
+]
+```
+
+Or if you rely on the auto-insert from `cordis.patch.yml` inside the plugin package itself, you can override via the profile-level patch:
+
+```yaml
+[
+  {
+    id: "llm-retry",
+    disabled: true
+  },
+  {
+    id: "llm-retry-infinite",
+    config: {
+      initialDelayMs: 500
+      maxDelayMs: 600000
+      jitterRatio: 0.1
+    }
+  }
+]
+```
+
+### Parameter constraints
+
+| Parameter | Type | Default | Range |
+|-----------|------|---------|-------|
+| `initialDelayMs` | number | 1000 | (0, 600 000] |
+| `maxDelayMs` | number | 600 000 | (0, 600 000] |
+| `jitterRatio` | number | 0.1 | [0, 1] |
+
+Additional rules:
 - `initialDelayMs` must be ≤ `maxDelayMs`.
+- The hard ceiling of **600 000 ms (10 minutes)** cannot be exceeded regardless of configuration.
 
-The hard ceiling of 600 000 ms (10 minutes) cannot be overridden.
-
-## How it differs from `@deepseek-ai/dsh-llm-retry`
-
-| Feature | `dsh-llm-retry-infinite` | `@deepseek-ai/dsh-llm-retry` |
-|---------|--------------------------|-------------------------------|
-| Retry limit | **None** (infinite) | Configurable (default: 2) |
-| Scope | Global for all providers | Per-provider via `retryPolicy` config |
-| Configuration | Plugin-level config | Provider adapter `retryPolicy` field |
-| Modes | Always retries | `normal` (bounded) or `always` (unbounded) |
-
-If you need per-provider control, use `@deepseek-ai/dsh-llm-retry` with `mode: 'always'` on each adapter. This plugin is a simpler global override.
+---
 
 ## Session events
 
-The plugin emits two durable (non-surface) session events:
+The plugin emits two durable, non-surface session events for observability:
 
-- **`llm/retry-infinite`** — recorded before each wait, with `turn`, `step`, `provider`, `retry` number, `delayMs`, and `failure` details.
-- **`llm/retry-infinite-started`** — recorded when the wait completes and the retry begins.
+| Event | When | Payload |
+|-------|------|---------|
+| `llm/retry-infinite` | Before each wait | `turn`, `step`, `provider`, `retry`, `delayMs`, `failure` |
+| `llm/retry-infinite-started` | After wait completes, just before the retry fires | `turn`, `step`, `retry` |
 
-These are not visible to the model and do not contribute to token billing.
+These events are **not visible to the model** and do not contribute to token billing. They are available in the session event log for debugging and UI status display.
+
+---
+
+## How it differs from the built-in `dsh-llm-retry`
+
+| | `dsh-llm-retry-infinite` | `@deepseek-ai/dsh-llm-retry` |
+|---|---|---|
+| **Retry limit** | ∞ (none) | 2 (default), configurable |
+| **Scope** | Global — all providers | Per-provider via `retryPolicy` |
+| **Configuration** | Plugin-level in `cordis.patch.yml` | Each provider adapter's `retryPolicy` field |
+| **Modes** | Always retries | `normal` (bounded) or `always` (unbounded) |
+| **Replaces built-in?** | Yes — disables it via patch | N/A (is the built-in) |
+| **Backoff** | Exponential, 10 min cap | Exponential, 10 s default cap |
+
+---
+
+## Architecture notes
+
+### Why disable the built-in?
+
+DSH loads bundles in order. `dsh-base` (which contains `dsh-llm-retry`) is always first. In Cordis's waterfall event dispatch, handlers run **outermost-first** — the first-registered handler intercepts before later ones. If the built-in is not disabled, it handles the first 2 retries with its own backoff, then exhausts and passes control downstream. Disabling it via `cordis.patch.yml` ensures our plugin is the only handler.
+
+### Plugin structure
+
+```
+dsh-llm-retry-infinite/
+├── cordis.patch.yml        # Auto-insert entry for the Cordis loader
+├── lib/
+│   ├── index.js            # Plugin implementation
+│   └── types/
+│       └── index.d.ts      # TypeScript declarations
+├── package.json            # dsh.bundle declaration + schemastery dep
+└── README.md
+```
+
+The `dsh.bundle.patch` field in `package.json` points to `cordis.patch.yml`, which tells the loader how to insert the plugin into the layer stack.
+
+---
 
 ## License
 
 MIT
-# dsh-llm-retry-infinite
