@@ -45,6 +45,94 @@ export interface RetryInternals {
 }
 
 /**
+ * Live retry state, returned by `ctx.retryState()`.
+ * Updated on every retry event; the UI can poll this for real-time display.
+ */
+export interface RetryState {
+  /** Whether a retry is currently in progress (waiting). */
+  active: boolean;
+
+  /** The agent turn that is being retried. */
+  turn?: number;
+
+  /** The step within the turn. */
+  step?: number;
+
+  /** The provider that failed (e.g. "openai", "anthropic"). */
+  provider?: string;
+
+  /** 1-based retry attempt number (1 = first retry after initial failure). */
+  retry?: number;
+
+  /** The computed delay for this retry in milliseconds. */
+  delayMs?: number;
+
+  /** Human-readable delay string (e.g. "16s", "2m 8s"). */
+  delayFormatted?: string;
+
+  /** Absolute timestamp (ms since epoch) when the wait ends. */
+  deadline?: number;
+
+  /** HTTP status code from the failure, if available. */
+  statusCode?: number;
+
+  /** Human-readable status label (e.g. "rate limited", "server error"). */
+  statusText?: string;
+
+  /** Combined status message for display (e.g. "Retrying — rate limited (429), attempt #3, waiting 16s"). */
+  statusMessage?: string;
+
+  /** Cumulative time spent waiting across all retries for this turn+step+provider. */
+  cumulativeWaitMs?: number;
+
+  /** Remaining milliseconds until the wait ends (computed on read). */
+  remainingMs?: number;
+
+  /** Human-readable remaining time (e.g. "4s"). */
+  remainingFormatted?: string;
+}
+
+/**
+ * Enriched event data emitted with each `llm/retry-infinite` event.
+ */
+export interface RetryEventData {
+  turn: number;
+  step: number;
+  provider: string;
+  retry: number;
+  delayMs: number;
+  delayFormatted: string;
+  statusCode: number | undefined;
+  statusText: string;
+  deadline: number;
+  statusMessage: string;
+  cumulativeWaitMs: number;
+  failure: unknown;
+}
+
+/**
+ * Event data for `llm/retry-infinite-started` (fired when wait ends, about to retry).
+ */
+export interface RetryStartedEventData {
+  turn: number;
+  step: number;
+  retry: number;
+  provider: string;
+  deadline: number;
+}
+
+/**
+ * Event data for `llm/retry-infinite-cancelled` (fired when retry is aborted).
+ */
+export interface RetryCancelledEventData {
+  turn: number;
+  step: number;
+  retry: number;
+  provider: string;
+  cumulativeWaitMs: number;
+}
+
+/**
  * Install infinite exponential retries for every LLM request failure.
  *
  * @param ctx   - Cordis plugin context
@@ -56,3 +144,16 @@ export declare function apply(
   config?: Config,
   internals?: RetryInternals
 ): void;
+
+/**
+ * Get the current live retry state for UI display.
+ * Returns `{ active: false }` when no retry is in progress.
+ *
+ * @example
+ *   const state = ctx.retryState();
+ *   if (state.active) {
+ *     console.log(state.statusMessage);
+ *     console.log(`${state.remainingFormatted} remaining`);
+ *   }
+ */
+export declare function retryState(): RetryState;

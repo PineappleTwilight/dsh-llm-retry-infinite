@@ -162,14 +162,115 @@ Additional rules:
 
 ## Session events
 
-The plugin emits two durable, non-surface session events for observability:
+The plugin emits durable, non-surface session events for observability and UI display:
 
 | Event | When | Payload |
 |-------|------|---------|
-| `llm/retry-infinite` | Before each wait | `turn`, `step`, `provider`, `retry`, `delayMs`, `failure` |
-| `llm/retry-infinite-started` | After wait completes, just before the retry fires | `turn`, `step`, `retry` |
+| `llm/retry-infinite` | Before each wait | `turn`, `step`, `provider`, `retry`, `delayMs`, `delayFormatted`, `statusCode`, `statusText`, `statusMessage`, `deadline`, `cumulativeWaitMs`, `failure` |
+| `llm/retry-infinite-started` | After wait completes, just before the retry fires | `turn`, `step`, `retry`, `provider`, `deadline` |
+| `llm/retry-infinite-cancelled` | When a retry is aborted (session close, disposal) | `turn`, `step`, `retry`, `provider`, `cumulativeWaitMs` |
 
 These events are **not visible to the model** and do not contribute to token billing. They are available in the session event log for debugging and UI status display.
+
+### Enriched event fields
+
+Each `llm/retry-infinite` event includes rich metadata for UI rendering:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `statusCode` | `number \| undefined` | HTTP status code from the failure (429, 500, 503, etc.) |
+| `statusText` | `string` | Human-readable status label (e.g. "rate limited", "server error") |
+| `statusMessage` | `string` | Full display message: `"Retrying — rate limited (429), attempt #3, waiting 16s"` |
+| `deadline` | `number` | Absolute timestamp (ms since epoch) when the wait ends |
+| `delayFormatted` | `string` | Human-readable delay (e.g. `"16s"`, `"2m 8s"`) |
+| `cumulativeWaitMs` | `number` | Total time spent waiting across all retries for this turn+step |
+
+---
+
+## UI visual indicator
+
+The plugin provides two mechanisms for building retry status UIs:
+
+### 1. Live retry state accessor
+
+Use `ctx.retryState()` to get the current retry state at any time. This is ideal for reactive UIs that poll or subscribe to state changes.
+
+```javascript
+// In any component or event handler:
+const state = ctx.retryState();
+
+if (state.active) {
+  console.log(state.statusMessage);
+  // → "Retrying — rate limited (429), attempt #3, waiting 16s"
+
+  console.log(`${state.remainingFormatted} remaining`);
+  // → "12s remaining"
+
+  // state includes: active, retry, statusCode, statusText, delayMs,
+  // deadline, remainingMs, remainingFormatted, cumulativeWaitMs, etc.
+}
+```
+
+The `remainingMs` and `remainingFormatted` fields are **computed on read** — they reflect the live countdown as the wait progresses.
+
+### 2. Display helpers (`dsh-llm-retry-infinite/display`)
+
+Import from the `/display` subpath for rendering utilities:
+
+```javascript
+import {
+  renderTerminalStatus,
+  renderHTMLIndicator,
+  renderMarkdownStatus,
+  statusIndicator,
+  RETRY_INDICATOR_CSS,
+} from "dsh-llm-retry-infinite/display";
+```
+
+#### Terminal status
+
+```javascript
+const state = ctx.retryState();
+const line = renderTerminalStatus(state);
+// → "⏳ Retrying #3 — rate limited (429), waiting 16s (4s remaining)"
+```
+
+#### HTML indicator
+
+```javascript
+const state = ctx.retryState();
+const html = renderHTMLIndicator(state);
+// Returns a self-contained <div> with classes for CSS styling.
+// Inject RETRY_INDICATOR_CSS for default styling.
+```
+
+#### Markdown status
+
+```javascript
+const state = ctx.retryState();
+const md = renderMarkdownStatus(state);
+// → "⏳ **Retrying #3** — rate limited `429` · waiting 16s · 4s left"
+```
+
+#### Status indicator lookup
+
+```javascript
+const info = statusIndicator(429);
+// → { color: "yellow", emoji: "⏳", label: "Rate Limited" }
+```
+
+### Status code visual mapping
+
+| Code | Emoji | Color | Label |
+|------|-------|-------|-------|
+| 429 | ⏳ | yellow | Rate Limited |
+| 500 | 💥 | red | Server Error |
+| 502 | 🔴 | red | Bad Gateway |
+| 503 | 🔴 | red | Service Unavailable |
+| 408 | ⏱️ | orange | Timeout |
+| 401 | 🔒 | red | Unauthorized |
+| 403 | 🚫 | red | Forbidden |
+| other | ❓ | gray | Unknown Error |
 
 ---
 
