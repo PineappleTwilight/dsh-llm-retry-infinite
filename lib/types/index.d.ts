@@ -102,7 +102,7 @@ export interface RetryEventData {
   retry: number;
   delayMs: number;
   delayFormatted: string;
-  statusCode: number | undefined;
+  statusCode?: number;
   statusText: string;
   deadline: number;
   statusMessage: string;

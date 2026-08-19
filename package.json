@@ -22,6 +22,9 @@
       "patch": "./cordis.patch.yml"
     }
   },
+  "scripts": {
+    "test": "node test-plugin.mjs && node test-serialize.mjs"
+  },
   "files": [
     "lib/index.js",
     "lib/display/index.js",
