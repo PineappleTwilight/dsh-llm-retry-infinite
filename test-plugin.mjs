@@ -162,4 +162,100 @@ if (!cancelledEvent) {
   process.exit(1);
 }
 
+// 5. Verify standard DSH Web UI event emissions
+const standardRetryEvents = events.filter((e) => e.type === "llm/retry");
+const standardStartedEvents = events.filter((e) => e.type === "llm/retry-started");
+
+if (standardRetryEvents.length === 0) {
+  console.error("FAIL: No standard llm/retry events emitted");
+  process.exit(1);
+}
+
+for (const e of standardRetryEvents) {
+  if (!e.data.retryId || typeof e.data.retryId !== "string") {
+    console.error("FAIL: llm/retry missing valid retryId:", e.data);
+    process.exit(1);
+  }
+  if (e.data.mode !== "always") {
+    console.error("FAIL: llm/retry mode is not always:", e.data);
+    process.exit(1);
+  }
+  if (!e.data.failure || typeof e.data.failure !== "object") {
+    console.error("FAIL: llm/retry missing failure object:", e.data);
+    process.exit(1);
+  }
+}
+
+if (standardStartedEvents.length === 0) {
+  console.error("FAIL: No standard llm/retry-started events emitted");
+  process.exit(1);
+}
+
+for (const e of standardStartedEvents) {
+  if (!e.data.retryId || typeof e.data.retryId !== "string") {
+    console.error("FAIL: llm/retry-started missing valid retryId:", e.data);
+    process.exit(1);
+  }
+}
+
+console.log(`Verified ${standardRetryEvents.length} standard llm/retry events and ${standardStartedEvents.length} llm/retry-started events.`);
+
+// 6. Test client module
+const clientModule = await import("./lib/client.js");
+if (!Array.isArray(clientModule.inject) || !clientModule.inject.includes("slots")) {
+  console.error("FAIL: clientModule inject invalid:", clientModule.inject);
+  process.exit(1);
+}
+
+if (typeof clientModule.apply !== "function") {
+  console.error("FAIL: clientModule apply is not a function");
+  process.exit(1);
+}
+
+// Test createRetryDock
+const mockReact = {
+  createElement: (tag, props, children) => ({ tag, props, children }),
+  useState: (init) => [typeof init === "function" ? init() : init, () => {}],
+  useEffect: (fn) => { fn(); },
+  useMemo: (fn) => fn(),
+};
+
+const MockRetryDock = clientModule.createRetryDock(mockReact);
+
+// Test inactive session -> renders null
+const inactiveResult = MockRetryDock({
+  session: {
+    running: false,
+    nodes: [],
+  },
+});
+if (inactiveResult !== null) {
+  console.error("FAIL: MockRetryDock should return null for inactive session, got:", inactiveResult);
+  process.exit(1);
+}
+
+// Test active retry session -> renders dock card
+const activeResult = MockRetryDock({
+  session: {
+    running: true,
+    nodes: [
+      {
+        kind: "model-retry",
+        retryState: "scheduled",
+        retry: 2,
+        delayMs: 4000,
+        seq: 10,
+        time: Date.now(),
+        failure: { message: "Rate limit reached", status: 429 },
+      },
+    ],
+  },
+});
+
+if (!activeResult || activeResult.props?.className !== "dsh-retry-dock-card") {
+  console.error("FAIL: MockRetryDock active result invalid:", activeResult);
+  process.exit(1);
+}
+
+console.log("Client module and RetryDock verified successfully.");
 console.log("ALL TESTS PASSED SUCCESSFULLY!");
